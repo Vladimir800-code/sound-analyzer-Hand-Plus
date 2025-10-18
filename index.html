@@ -1,0 +1,494 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8" />
+<title>Acoustic Analysis — R8d4c (fix: SG derivative coeffs)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root{ --axes:#222; --blue:#2f6fed; --orange:#ff7a18; --green:#1aab55; }
+  body{font-family:Arial, sans-serif; margin:0; background:#fff; color:#111;}
+  header{padding:10px 12px; border-bottom:1px solid #ddd; background:#fafafa}
+  h1{font-size:18px; margin:4px 0;}
+  .toolbar{display:flex; gap:8px; flex-wrap:wrap; margin:8px 12px; align-items:center;}
+  .button{padding:8px 14px; border-radius:8px; border:1px solid #ccc; cursor:pointer; background:#f5f5f5}
+  .status{margin:8px 12px; font-size:14px;} .status.ok{color:#0a7a2e} .status.warn{color:#b15d00} .status.error{color:#b00020}
+  .panel{margin:8px 12px; padding:10px; border:1px solid #eee; border-radius:8px; background:#fafafa}
+  .grid{display:grid; grid-template-columns: repeat(auto-fit,minmax(220px,1fr)); gap:8px;}
+  .kpi{padding:10px; border:1px solid #e6e6e6; border-radius:8px; background:#fff;}
+  .kpi b{display:block; font-size:12px; color:#444}
+  .kpi span{font-variant-numeric:tabular-nums; font-size:16px;}
+  canvas{border:1px solid #ddd; border-radius:6px; margin:8px 12px;}
+  #techModal{display:none; position:fixed; inset:0; background:rgba(0,0,0,0.25); z-index:1000;}
+  #techModal .card{position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); background:#fff; border-radius:12px; border:1px solid #ddd; width:min(920px,96vw); box-shadow:0 12px 36px rgba(0,0,0,0.25)}
+  #techModal .head{padding:12px 16px; border-bottom:1px solid #eee; display:flex; align-items:center; gap:8px;}
+  #techModal .body{padding:14px 16px 18px;}
+  #techModal .foot{padding:10px 16px; border-top:1px solid #eee; display:flex; justify-content:flex-end; gap:8px;}
+  .row{display:flex; gap:12px; align-items:center; flex-wrap:wrap; margin:10px 0;}
+  .row input[type="range"]{flex:1;}
+  .badge{min-width:70px; text-align:right; font-variant-numeric:tabular-nums;}
+  .checks{display:flex; gap:12px; align-items:center; margin-left:auto; font-size:13px; color:#333;}
+</style>
+</head>
+<body>
+<header><h1>R8d4c: 0.25‑сек сетка + нормировка по асимптоте интеграла</h1></header>
+
+<div class="toolbar">
+  <button id="btnStart" class="button">Начать запись</button>
+  <button id="btnStop" class="button">Остановить</button>
+  <button id="btnReset" class="button">Сброс</button>
+  <button id="btnTech" class="button">Технические настройки</button>
+  <div class="checks">
+    <label><input type="checkbox" id="chkRaw"> Raw</label>
+    <label><input type="checkbox" id="chkDerived"> Derived</label>
+    <label><input type="checkbox" id="chkIntegral"> Integral</label>
+  </div>
+</div>
+
+<div class="panel">
+  <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap;">
+    <label>Окно AFEV1 (с): <input type="range" id="fevWin" min="0.2" max="2.0" step="0.1"><span id="fevWinVal" class="badge"></span></label>
+  </div>
+</div>
+
+<div class="panel">
+  <div class="grid">
+    <div class="kpi"><b>AFEV1</b><span id="kpiAFEV1">—</span></div>
+    <div class="kpi"><b>AFVC (total)</b><span id="kpiAFVC">—</span></div>
+    <div class="kpi"><b>AFEF25–75</b><span id="kpiAFEF">—</span></div>
+    <div class="kpi"><b>PEAF (peak dE/dt)</b><span id="kpiPEAF">—</span></div>
+  </div>
+</div>
+
+<div class="status" id="status">Готов.</div>
+<canvas id="mainGraph" width="980" height="440"></canvas>
+
+<div id="techModal" role="dialog" aria-modal="true" aria-labelledby="techTitle" onclick="this.style.display='none'">
+  <div class="card" onclick="event.stopPropagation();">
+    <div class="head">
+      <span id="techTitle" style="font-weight:700;font-size:16px;">Technical settings</span>
+      <button id="btnCloseTechTop" class="button" style="margin-left:auto">Close</button>
+    </div>
+    <div class="body">
+      <div class="row">
+        <label for="uDtRange"><b>Δt (ms) — равномерная сетка:</b></label>
+        <input type="range" id="uDtRange" min="2" max="20" step="1">
+        <span class="badge" id="uDtVal"></span>
+      </div>
+      <div class="row">
+        <label for="sgWinRange"><b>SG window (odd):</b></label>
+        <input type="range" id="sgWinRange" min="7" max="200" step="1">
+        <span class="badge" id="sgWinVal"></span>
+        <label for="sgOrderRange"><b>order:</b></label>
+        <input type="range" id="sgOrderRange" min="2" max="10" step="1">
+        <span class="badge" id="sgOrderVal"></span>
+      </div>
+      <div class="row">
+        <label title="Обнулить производную вне интервала сигнала [Start–End]"><input type="checkbox" id="chkClamp"> Clamp outside [S–E]</label>
+      </div>
+      <hr style="border:none;border-top:1px solid #eee; margin:10px 0;">
+      <div class="row">
+        <label for="thrRange"><b>Relative threshold, %</b></label>
+        <input type="range" id="thrRange" min="0" max="10" step="0.1">
+        <span class="badge" id="thrVal"></span>
+        <label for="stabRange"><b>Stability criterion, %</b></label>
+        <input type="range" id="stabRange" min="0" max="5" step="0.1">
+        <span class="badge" id="stabVal"></span>
+        <label for="gainRange"><b>Signal gain (×)</b></label>
+        <input type="range" id="gainRange" min="0.1" max="2.0" step="0.1">
+        <span class="badge" id="gainVal"></span>
+      </div>
+    </div>
+    <div class="foot">
+      <button id="btnCloseTech" class="button">Close</button>
+    </div>
+  </div>
+</div>
+
+<script>
+function safeGet(k, def){ try{ const v=localStorage.getItem(k); return v===null?def:v; }catch(e){ return def; } }
+function safeSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
+function loadNum(k,d){ const s=safeGet(k,null); const v=Number(s); return Number.isFinite(v)?v:d; }
+function saveNum(k,v){ safeSet(k,String(v)); }
+function loadBool(k,d){ const s=safeGet(k,null); return s==null?d:(s==='1'); }
+function saveBool(k,b){ safeSet(k,b?'1':'0'); }
+const STATUS=document.getElementById('status');
+function setStatus(m,l){ STATUS.className='status '+(l||'ok'); STATUS.textContent=m; }
+const KEY = { dt:'u_dt_ms', win:'sg_win', order:'sg_order', clamp:'clamp_out',
+  thr:'rel_thr_pct', stab:'stab_pct', gain:'sig_gain',
+  showRaw:'show_raw', showDer:'show_der', showInt:'show_int', fev:'fev_win' };
+
+let audioCtx=null, analyser=null, source=null, micStream=null;
+let recording=false, t0=0, lastT=0, rafId=null;
+let sampleTimes=[], rawIntensity=[], integralValues=[], derivedIntensity=[], smIntUniform=[];
+let signalStartTime=null, signalEndTime=null, isSignalActive=false, maxIntensity=0;
+
+function linInterp(xs, ys, xq){
+  const n=xs.length; if(n===0) return 0; if(xq<=xs[0]) return ys[0]; if(xq>=xs[n-1]) return ys[n-1];
+  let lo=0, hi=n-1; while(hi-lo>1){ const mid=(lo+hi)>>1; if(xs[mid]<=xq) lo=mid; else hi=mid; }
+  const t=(xq-xs[lo])/(Math.max(1e-12,(xs[hi]-xs[lo]))); return ys[lo]*(1-t)+ys[hi]*t;
+}
+function pchipBuild(x, y){
+  const n=x.length, h=new Array(n-1), d=new Array(n-1);
+  for(let i=0;i<n-1;i++){ h[i]=x[i+1]-x[i]; d[i]=(y[i+1]-y[i])/(h[i]||1e-12); }
+  const m=new Array(n); m[0]=d[0]; m[n-1]=d[n-2];
+  for(let i=1;i<n-1;i++){
+    if(d[i-1]*d[i]<=0) m[i]=0;
+    else { const w1=2*h[i]+h[i-1], w2=h[i]+2*h[i-1]; m[i]=(w1+w2)/((w1/d[i-1])+(w2/d[i])); }
+  }
+  return {x,y,h,m};
+}
+function pchipEval(s, t){
+  const x=s.x, y=s.y, h=s.h, m=s.m, n=x.length;
+  function loc(tt){ if(tt<=x[0]) return 0; if(tt>=x[n-1]) return n-2; let lo=0,hi=n-1; while(hi-lo>1){ const mid=(lo+hi)>>1; if(x[mid]<=tt) lo=mid; else hi=mid; } return lo; }
+  const i=loc(t), xi=x[i], hi=h[i], yi=y[i], yi1=y[i+1], mi=m[i], mi1=m[i+1];
+  const z=(t-xi)/(hi||1e-12), z2=z*z, z3=z2*z;
+  const h00= 2*z3 - 3*z2 + 1, h10= z3 - 2*z2 + z, h01= -2*z3 + 3*z2, h11= z3 - z2;
+  return h00*yi + h10*hi*mi + h01*yi1 + h11*hi*mi1;
+}
+function sgCoeffs(w, p, deriv){
+  const m=(w-1)/2, k=p+1, rows=w, A=[];
+  for(let i=-m;i<=m;i++){ const row=[]; let vv=1; for(let j=0;j<k;j++){ row.push(vv); vv*=i; } A.push(row); }
+  const ATA=Array.from({length:k},()=>Array(k).fill(0));
+  for(let r=0;r<k;r++) for(let c=0;c<k;c++){ let s=0; for(let i=0;i<rows;i++) s+=A[i][r]*A[i][c]; ATA[r][c]=s; }
+  const I=Array.from({length:k},(_,i)=>Array.from({length:k},(__,j)=>i===j?1:0));
+  for(let i=0;i<k;i++){ ATA[i]=ATA[i].concat(I[i]); }
+  for(let i=0;i<k;i++){
+    let piv=ATA[i][i]||1e-18, inv=1/piv;
+    for(let j=0;j<2*k;j++) ATA[i][j]*=inv;
+    for(let r=0;r<k;r++){ if(r===i) continue; const f=ATA[r][i]; for(let j=0;j<2*k;j++) ATA[r][j]-=f*ATA[i][j]; }
+  }
+  const ATAi=ATA.map(row=>row.slice(k));
+  const AT=Array.from({length:k},()=>Array(rows).fill(0)); for(let r=0;r<k;r++) for(let c=0;c<rows;c++) AT[r][c]=A[c][r];
+  const pinv=Array.from({length:k},()=>Array(rows).fill(0));
+  for(let r=0;r<k;r++) for(let c=0;c<rows;c++){ let s=0; for(let q=0;q<k;q++) s+=ATAi[r][q]*AT[q][c]; pinv[r][c]=s; }
+  const d=Array(k).fill(0);
+  d[Math.min(deriv,k-1)] = 1; // derivative order
+  const coeffs=new Array(rows).fill(0);
+  for(let c=0;c<rows;c++){ let s=0; for(let j=0;j<k;j++) s+=d[j]*pinv[j][c]; coeffs[c]=s; }
+  return coeffs;
+}
+function sgFilterUniform(x, w, p, deriv, dt){
+  if(w%2===0) w+=1;
+  const m=(w-1)/2, coeffs=sgCoeffs(w,p,deriv), n=x.length, y=new Array(n).fill(0);
+  for(let i=0;i<n;i++){ let s=0; for(let k=-m;k<=m;k++){ const idx=Math.min(n-1, Math.max(0, i+k)); s+=x[idx]*coeffs[k+m]; } y[i]=s; }
+  if(deriv>0){ const scale=Math.pow(1/dt,deriv); for(let i=0;i<n;i++) y[i]*=scale; }
+  return y;
+}
+const DEF_ZERO_PHASE = true;
+function zeroPhaseSmooth(Eu, w, p){
+  if(!DEF_ZERO_PHASE) return sgFilterUniform(Eu, w, p, 0, 1);
+  const fwd = sgFilterUniform(Eu, w, p, 0, 1);
+  const rev = fwd.slice().reverse();
+  const rev2 = sgFilterUniform(rev, w, p, 0, 1).reverse();
+  return rev2;
+}
+
+function updateAll(){
+  const n=integralValues.length;
+  if(n<3){ smIntUniform=integralValues.slice(); derivedIntensity=new Array(n).fill(0); return; }
+  const t=sampleTimes, E=integralValues;
+  const sp=pchipBuild(t,E);
+  const dtMs=Math.max(2, Math.min(20, loadNum(KEY.dt, 3)));
+  const dt=dtMs/1000.0;
+  const t0u=t[0], t1u=t[t.length-1];
+  const M=Math.max(2, Math.floor((t1u-t0u)/dt))+1;
+  const tu=new Array(M), Eu=new Array(M);
+  for(let i=0;i<M;i++){ const tq=t0u + i*dt; tu[i]=tq; Eu[i]=pchipEval(sp, tq); }
+  let win=Math.max(7, Math.min(200, loadNum(KEY.win, 31))); if(win%2===0) win+=1;
+  const order=Math.max(2, Math.min(10, loadNum(KEY.order, 3)));
+  const EuSmooth = zeroPhaseSmooth(Eu, win, order);
+  smIntUniform = EuSmooth.slice();
+  const Du = sgFilterUniform(EuSmooth, win, order, 1, dt);
+  const deriv=new Array(n);
+  for(let i=0;i<n;i++){ deriv[i]=linInterp(tu, Du, t[i]); }
+  const clampOutside = loadBool(KEY.clamp, true);
+  for(let i=0;i<n;i++){
+    let v=deriv[i]; if(!(v>0)) v=0;
+    if(clampOutside && (signalStartTime!=null && signalEndTime!=null)){
+      const ti=t[i]; if(ti<signalStartTime || ti>signalEndTime) v=0;
+    }
+    deriv[i]=v;
+  }
+  derivedIntensity=deriv;
+}
+
+const canvas=document.getElementById('mainGraph'); const ctx=canvas.getContext('2d');
+function plotRect(){ return {left:48, right:48, top:8, bottom:32}; }
+function mapValToY(val,minV,maxV){ const r=plotRect(); const h=canvas.height - r.top - r.bottom; const p=(val-minV)/(maxV-minV||1); return r.top + (h-1) - p*(h-1); }
+function mapTimeToX(t,tMax){ const r=plotRect(); const w=canvas.width - r.left - r.right; return r.left + (tMax>0? (t/tMax)*w : 0); }
+function niceStep(range){ const raw = range/6; const pow = Math.pow(10, Math.floor(Math.log10(raw || 1))); const scaled = raw/pow; let base=1; if(scaled>5) base=10; else if(scaled>2) base=5; else if(scaled>1) base=2; return base*pow; }
+
+function drawAxes(maxI, maxE){
+  const r=plotRect(); const w=canvas.width, h=canvas.height;
+  ctx.clearRect(0,0,w,h);
+  ctx.font='11px Arial'; ctx.fillStyle='#444'; ctx.textBaseline='middle';
+  const yMaxI = maxI*1.05 || 1; const yStepI = niceStep(yMaxI);
+  for(let v=0; v<=yMaxI+1e-12; v+=yStepI){
+    const y = mapValToY(v, 0, yMaxI);
+    ctx.strokeStyle='rgba(0,0,0,0.06)'; ctx.beginPath(); ctx.moveTo(r.left, y); ctx.lineTo(w-r.right, y); ctx.stroke();
+  }
+  const tMax = sampleTimes.length? sampleTimes[sampleTimes.length-1] : 1;
+  const stepT = 1.0;
+  for(let t=0; t<=tMax+1e-12; t+=stepT){
+    const x = mapTimeToX(t, tMax);
+    ctx.strokeStyle='rgba(0,0,0,0.08)';
+    ctx.beginPath(); ctx.moveTo(x, r.top); ctx.lineTo(x, h-r.bottom); ctx.stroke();
+  }
+  ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); ctx.lineWidth=1;
+  ctx.beginPath();
+  ctx.moveTo(r.left, r.top); ctx.lineTo(r.left, h-r.bottom);
+  ctx.moveTo(w-r.right, r.top); ctx.lineTo(w-r.right, h-r.bottom);
+  ctx.moveTo(r.left, h-r.bottom); ctx.lineTo(w-r.right, h-r.bottom);
+  ctx.stroke();
+  ctx.textAlign='right';
+  for(let v=0; v<=yMaxI+1e-12; v+=yStepI){
+    const y = mapValToY(v, 0, yMaxI);
+    ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); ctx.beginPath(); ctx.moveTo(r.left-4, y); ctx.lineTo(r.left, y); ctx.stroke();
+    ctx.fillText(v.toPrecision(2), r.left-6, y);
+  }
+  ctx.textAlign='left'; ctx.fillStyle='#444';
+  const yMaxE = maxE*1.1 || 1; const yStepE = niceStep(yMaxE);
+  for(let v=0; v<=yMaxE+1e-12; v+=yStepE){
+    const y = mapValToY(v, 0, yMaxE);
+    ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); ctx.beginPath(); ctx.moveTo(w-r.right, y); ctx.lineTo(w-r.right+4, y); ctx.stroke();
+    ctx.fillText(v.toPrecision(2), w-r.right+6, y);
+  }
+  ctx.textAlign='center'; ctx.textBaseline='top'; ctx.fillStyle='#333';
+  for(let t=0; t<=tMax+1e-12; t+=stepT){
+    const x = mapTimeToX(t, tMax);
+    ctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes');
+    ctx.beginPath(); ctx.moveTo(x, h-r.bottom); ctx.lineTo(x, h-r.bottom+4); ctx.stroke();
+    ctx.fillText(t.toFixed(2)+' s', x, h-r.bottom+6);
+  }
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--orange'); ctx.textAlign='left'; ctx.fillText('Интенсивность (дифф.)', r.left, r.top-2);
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--green'); ctx.textAlign='right'; ctx.fillText('Интегральная энергия', w-r.right, r.top-2);
+}
+
+function drawSeriesByTime(times, vals, color, lw, yMax){
+  const r=plotRect(); const wPlot=canvas.width - r.left - r.right; const n=times.length; if(n<2) return;
+  const tMax = times[n-1];
+  const step = Math.max(1, Math.ceil(n / wPlot));
+  ctx.beginPath();
+  for(let i=0;i<n;i+=step){
+    const x = mapTimeToX(times[i], tMax);
+    const y = mapValToY(vals[i], 0, yMax);
+    if(i===0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.strokeStyle=color; ctx.lineWidth=lw; ctx.stroke();
+}
+
+
+/* === KPIs (AFEV1, AFVC, AFEF25–75, PEAF) — added, no other logic touched === */
+function fmtVal(x){ if(!isFinite(x)) return '—'; const a=Math.abs(x); if(a===0) return '0.00000'; return (a>=1e-4 && a<1e3) ? x.toFixed(5) : x.toExponential(2); }
+function timeAtEnergy(target){
+  const xs=sampleTimes, ys=integralValues, n=xs.length;
+  if(n<2) return xs.length?xs[0]:0;
+  if(target<=ys[0]) return xs[0];
+  if(target>=ys[n-1]) return xs[n-1];
+  let lo=0, hi=n-1;
+  while(hi-lo>1){ const mid=(lo+hi)>>1; if(ys[mid] < target) lo=mid; else hi=mid; }
+  const t=(target-ys[lo])/Math.max(1e-12,(ys[hi]-ys[lo]));
+  return xs[lo] + t*(xs[hi]-xs[lo]);
+}
+function updateKPIs(){
+  const el1=document.getElementById('kpiAFEV1');
+  const el2=document.getElementById('kpiAFVC');
+  const el3=document.getElementById('kpiAFEF');
+  const el4=document.getElementById('kpiPEAF');
+  if(!(sampleTimes && sampleTimes.length>=2)){ el1.textContent='—'; el2.textContent='—'; el3.textContent='—'; el4.textContent='—'; return; }
+  const se=currentStartEnd(), s=se.s, e=se.e;
+  const Es=interpE(s), Ee=interpE(e);
+  const total=Math.max(0, Ee-Es);
+  const fev=loadNum(KEY.fev, 1.0);
+  const t1=Math.min(e, s+fev);
+  const AFEV1 = Math.max(0, interpE(t1) - Es);
+  let AFEF2575 = NaN;
+  if(total>0){
+    const E25=Es+0.25*total, E75=Es+0.75*total;
+    const t25=timeAtEnergy(E25), t75=timeAtEnergy(E75);
+    const dt=Math.max(1e-6, t75 - t25);
+    AFEF2575=(E75 - E25)/dt;
+  }
+  const scale=computeDerivedScale_Asymptote();
+  let peak=0;
+  for(let i=0;i<sampleTimes.length;i++){
+    const t=sampleTimes[i]; if(t<s || t>e) continue;
+    const v=(derivedIntensity[i]||0)*scale; if(v>peak) peak=v;
+  }
+  el1.textContent = fmtVal(AFEV1);
+  el2.textContent = fmtVal(total);
+  el3.textContent = isFinite(AFEF2575)? fmtVal(AFEF2575) : '—';
+  el4.textContent = fmtVal(peak);
+}
+/* === End KPI block === */
+
+function drawGraph(){
+
+  const scale = computeDerivedScale_Asymptote();
+  const maxRaw = Math.max(...rawIntensity,1e-12);
+  const maxDer = Math.max(...derivedIntensity.map(v=>v*scale),1e-12);
+  const maxI = Math.max(maxRaw, maxDer);
+  const maxE = Math.max(...integralValues,1e-12);
+  drawAxes(maxI, maxE);
+  const style = getComputedStyle(document.documentElement);
+  const blue=style.getPropertyValue('--blue').trim();
+  const orange=style.getPropertyValue('--orange').trim();
+  const green=style.getPropertyValue('--green').trim();
+  if(document.getElementById('chkRaw').checked)
+    drawSeriesByTime(sampleTimes, rawIntensity, blue, 1.5, maxI*1.05);
+  if(document.getElementById('chkDerived').checked)
+    drawSeriesByTime(sampleTimes, derivedIntensity.map(v=>v*scale), orange, 2.0, maxI*1.05);
+  if(document.getElementById('chkIntegral').checked)
+    drawSeriesByTime(sampleTimes, integralValues, green, 2.0, maxE*1.1);
+}
+
+function trapezoidIntegral(times, values, tStart, tEnd){
+  if(times.length<2) return 0;
+  let sum=0;
+  for(let i=1;i<times.length;i++){
+    const t0=times[i-1], t1=times[i];
+    if(t1<=tStart || t0>=tEnd) continue;
+    const a = Math.max(tStart, t0), b=Math.min(tEnd, t1);
+    const v0 = values[i-1], v1 = values[i];
+    const fracA = (a - t0)/Math.max(1e-12,(t1-t0)), fracB = (b - t0)/Math.max(1e-12,(t1-t0));
+    const va = v0 + (v1 - v0)*fracA;
+    const vb = v0 + (v1 - v0)*fracB;
+    sum += 0.5*(va + vb)*(b - a);
+  }
+  return Math.max(0,sum);
+}
+function interpE(tq){
+  const xs=sampleTimes, ys=integralValues, n=xs.length;
+  if(n===0) return 0; if(tq<=xs[0]) return ys[0]; if(tq>=xs[n-1]) return ys[n-1];
+  let lo=0, hi=n-1; while(hi-lo>1){ const mid=(lo+hi)>>1; if(xs[mid]<=tq) lo=mid; else hi=mid; }
+  const tt=(tq-xs[lo])/(xs[hi]-xs[lo]); return ys[lo]*(1-tt)+ys[hi]*tt;
+}
+function currentStartEnd(){
+  const s=(signalStartTime==null)? (sampleTimes[0]||0) : signalStartTime;
+  const e=(signalEndTime==null)? (sampleTimes[sampleTimes.length-1]||s) : signalEndTime;
+  return {s,e};
+}
+function computeDerivedScale_Asymptote(){
+  const n=Math.min(sampleTimes.length, derivedIntensity.length, integralValues.length);
+  if(n<2) return 1.0;
+  const {s,e}=currentStartEnd();
+  const target = Math.max(0, interpE(e) - interpE(s));
+  const area = trapezoidIntegral(sampleTimes, derivedIntensity, s, e);
+  const scale = (area>0)? (target/area) : 1.0;
+  return scale;
+}
+
+function withTimeout(promise, ms, errMsg){
+  return Promise.race([promise, new Promise((_,rej)=>setTimeout(()=>rej(new Error(errMsg||'Timeout')), ms))]);
+}
+async function requestMic(){
+  const stream = await withTimeout(navigator.mediaDevices.getUserMedia({audio:true}), 3000, 'Микрофон: тайм‑аут 3 с');
+  micStream = stream;
+  audioCtx = audioCtx || new (window.AudioContext||window.webkitAudioContext)();
+  await withTimeout(audioCtx.resume(), 1500, 'AudioContext: тайм‑аут 1.5 с');
+  analyser = audioCtx.createAnalyser(); analyser.fftSize=2048;
+  source = audioCtx.createMediaStreamSource(stream); source.connect(analyser);
+}
+function getRelativeThresholdFraction(){ return loadNum(KEY.thr, 5)/100; }
+function getSignalGain(){ return loadNum(KEY.gain, 1.0); }
+function detectSignalStart(intensity, currentTime){
+  maxIntensity = Math.max(maxIntensity, intensity);
+  const threshold = Math.max(maxIntensity * getRelativeThresholdFraction(), 0.001);
+  if (!isSignalActive && intensity > threshold) { isSignalActive = true; signalStartTime = currentTime - t0; }
+}
+
+let lastDraw = 0;
+function drawGraphThrottled(){ const now=performance.now(); if(now-lastDraw<80) return; lastDraw=now; drawGraph(); }
+
+function tick(){
+  if(!recording) return;
+  const buffer=new Float32Array(analyser.fftSize); analyser.getFloatTimeDomainData(buffer);
+  let a=0; for(let v of buffer) a+=v*v; const r=Math.sqrt(a/(buffer.length||1));
+  const intensity=(r*r) * (getSignalGain()**2);
+  const t=audioCtx.currentTime, dt=Math.max(0,t-lastT); lastT=t;
+  const relTime=t - t0; sampleTimes.push(relTime);
+  const last=(integralValues.length?integralValues[integralValues.length-1]:0);
+  const next = last + intensity*dt;
+  rawIntensity.push(intensity); integralValues.push(next);
+  detectSignalStart(intensity, t);
+  updateAll();
+  drawGraphThrottled();
+  rafId = requestAnimationFrame(tick);
+}
+
+function applySavedToggles(){
+  document.getElementById('chkRaw').checked     = loadBool(KEY.showRaw, true);
+  document.getElementById('chkDerived').checked = loadBool(KEY.showDer, true);
+  document.getElementById('chkIntegral').checked= loadBool(KEY.showInt, true);
+}
+function wireTogglePersistence(){
+  document.getElementById('chkRaw').addEventListener('change', e=>{ saveBool(KEY.showRaw, e.target.checked); drawGraph(); });
+  document.getElementById('chkDerived').addEventListener('change', e=>{ saveBool(KEY.showDer, e.target.checked); drawGraph(); });
+  document.getElementById('chkIntegral').addEventListener('change', e=>{ saveBool(KEY.showInt, e.target.checked); drawGraph(); });
+}
+function syncTechUI(){
+  const uDtRange=document.getElementById('uDtRange'), uDtVal=document.getElementById('uDtVal');
+  const sgWinRange=document.getElementById('sgWinRange'), sgWinVal=document.getElementById('sgWinVal');
+  const sgOrderRange=document.getElementById('sgOrderRange'), sgOrderVal=document.getElementById('sgOrderVal');
+  const chkClamp=document.getElementById('chkClamp');
+  const thrRange=document.getElementById('thrRange'), stabRange=document.getElementById('stabRange'), gainRange=document.getElementById('gainRange');
+
+  if(safeGet(KEY.dt,null)===null) saveNum(KEY.dt, 3);
+  if(safeGet(KEY.win,null)===null) saveNum(KEY.win, 31);
+  if(safeGet(KEY.order,null)===null) saveNum(KEY.order, 3);
+  if(safeGet(KEY.clamp,null)===null) saveBool(KEY.clamp, true);
+  if(safeGet(KEY.thr,null)===null) saveNum(KEY.thr, 5);
+  if(safeGet(KEY.stab,null)===null) saveNum(KEY.stab, 1);
+  if(safeGet(KEY.gain,null)===null) saveNum(KEY.gain, 1.0);
+  if(safeGet(KEY.fev,null)===null) saveNum(KEY.fev, 1.0);
+
+  uDtRange.value = String(loadNum(KEY.dt,3)); uDtVal.textContent = loadNum(KEY.dt,3).toFixed(0)+' ms';
+  sgWinRange.value = String(loadNum(KEY.win,31)); sgWinVal.textContent = loadNum(KEY.win,31).toFixed(0);
+  sgOrderRange.value = String(loadNum(KEY.order,3)); sgOrderVal.textContent = loadNum(KEY.order,3).toFixed(0);
+  chkClamp.checked = loadBool(KEY.clamp, true);
+  thrRange.value = String(loadNum(KEY.thr,5)); document.getElementById('thrVal').textContent = loadNum(KEY.thr,5).toFixed(1)+'%';
+  stabRange.value = String(loadNum(KEY.stab,1)); document.getElementById('stabVal').textContent = loadNum(KEY.stab,1).toFixed(2)+'%';
+  gainRange.value = String(loadNum(KEY.gain,1.0)); document.getElementById('gainVal').textContent = '×'+loadNum(KEY.gain,1.0).toFixed(1);
+
+  uDtRange.addEventListener('input', e=>{ const v=Math.max(2, Math.min(20, Number(e.target.value)||3)); saveNum(KEY.dt, v); uDtVal.textContent=v.toFixed(0)+' ms'; updateAll(); drawGraph(); });
+  sgWinRange.addEventListener('input', e=>{ let v=Math.max(7, Math.min(200, Number(e.target.value)||31)); if(v%2===0) v+=1; saveNum(KEY.win, v); sgWinVal.textContent=v.toFixed(0); updateAll(); drawGraph(); });
+  sgOrderRange.addEventListener('input', e=>{ const v=Math.max(2, Math.min(10, Number(e.target.value)||3)); saveNum(KEY.order, v); sgOrderVal.textContent=v.toFixed(0); updateAll(); drawGraph(); });
+  chkClamp.addEventListener('change', e=>{ saveBool(KEY.clamp, e.target.checked); updateAll(); drawGraph(); });
+  thrRange.addEventListener('input', e=>{ const v=Math.max(0, Math.min(10, Number(e.target.value)||5)); saveNum(KEY.thr, v); document.getElementById('thrVal').textContent=v.toFixed(1)+'%'; });
+  stabRange.addEventListener('input', e=>{ const v=Math.max(0, Math.min(5, Number(e.target.value)||1)); saveNum(KEY.stab, v); document.getElementById('stabVal').textContent=v.toFixed(2)+'%'; });
+  gainRange.addEventListener('input', e=>{ const v=Math.max(0.1, Math.min(2.0, Number(e.target.value)||1.0)); saveNum(KEY.gain, v); document.getElementById('gainVal').textContent='×'+v.toFixed(1); });
+}
+
+function start(){ requestMic().then(()=>{ reset(); recording=true; t0=audioCtx.currentTime; lastT=t0; setStatus('🟢 Запись…'); rafId=requestAnimationFrame(tick); }).catch(e=>setStatus('❌ '+(e.message||e),'error')); }
+function stop(){ recording=false; if(rafId){ cancelAnimationFrame(rafId); rafId=null; 
+  // Ensure S/E exist for KPI
+  if(signalStartTime==null && sampleTimes.length){ signalStartTime = sampleTimes[0]; }
+  if(signalEndTime==null && sampleTimes.length){ signalEndTime = sampleTimes[sampleTimes.length-1]; }
+  try{ updateKPIs(); }catch(e){}
+}
+ if(audioCtx){ lastT=audioCtx.currentTime; } if(signalStartTime!==null && signalEndTime===null){ signalEndTime=lastT - t0; } setStatus('⏹️ Остановлено'); updateAll(); drawGraph(); }
+function reset(){ recording=false; if(rafId){ cancelAnimationFrame(rafId); rafId=null; } sampleTimes.length=0; rawIntensity.length=0; integralValues.length=0; derivedIntensity.length=0; smIntUniform.length=0; signalStartTime=null; signalEndTime=null; isSignalActive=false; maxIntensity=0; if(audioCtx){ t0=audioCtx.currentTime; lastT=t0; } setStatus('Сброс.'); drawGraph(); }
+
+document.getElementById('btnStart').onclick=start;
+document.getElementById('btnStop').onclick=stop;
+document.getElementById('btnReset').onclick=reset;
+document.getElementById('btnTech').onclick=()=>{ document.getElementById('techModal').style.display='block'; };
+document.getElementById('btnCloseTech').onclick=()=>{ document.getElementById('techModal').style.display='none'; };
+document.getElementById('btnCloseTechTop').onclick=()=>{ document.getElementById('techModal').style.display='none'; };
+
+function init(){
+  applySavedToggles();
+  wireTogglePersistence();
+  syncTechUI();
+  const fev = document.getElementById('fevWin'), fevVal=document.getElementById('fevWinVal');
+  if(safeGet(KEY.fev,null)===null) saveNum(KEY.fev, 1.0);
+  fev.value = String(loadNum(KEY.fev, 1.0)); fevVal.textContent = loadNum(KEY.fev,1.0).toFixed(1)+' c';
+  fev.addEventListener('input', (e)=>{ const v=Math.max(0.2, Math.min(2.0, Number(e.target.value)||1.0)); saveNum(KEY.fev, v); fevVal.textContent=v.toFixed(1)+' c'; });
+  drawGraph();
+  setStatus('Готов.');
+}
+window.addEventListener('load', init);
+window.addEventListener('error', (e)=>{ setStatus('Ошибка скрипта: '+(e.message||e.error||'unknown'),'error'); });
+</script>
+</body>
+</html>
