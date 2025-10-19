@@ -61,6 +61,7 @@
 
 <div class="status" id="status">Готов.</div>
 <canvas id="mainGraph" width="980" height="440"></canvas>
+<canvas id="phaseGraph" width="980" height="300" style="margin-top:6px;"></canvas>
 
 <div id="techModal" role="dialog" aria-modal="true" aria-labelledby="techTitle" onclick="this.style.display='none'">
   <div class="card" onclick="event.stopPropagation();">
@@ -264,6 +265,85 @@ function drawAxes(maxI, maxE){
   ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--green'); ctx.textAlign='right'; ctx.fillText('Интегральная энергия', w-r.right, r.top-2);
 }
 
+
+// ----- Phase diagram (Intensity vs Accumulated Energy) -----
+const phaseCanvas = document.getElementById('phaseGraph');
+const pctx = phaseCanvas.getContext('2d');
+
+function pRect(){ return {left:48, right:24, top:10, bottom:36}; }
+function mapPhaseX(E, maxE){ const r=pRect(); const w=phaseCanvas.width - r.left - r.right; return r.left + (maxE>0? (E/maxE)*w : 0); }
+function mapPhaseY(I, maxI){ const r=pRect(); const h=phaseCanvas.height - r.top - r.bottom; const p=(I)/(maxI||1); return r.top + (h-1) - p*(h-1); }
+
+function niceStep2(range){ const raw=range/6; const pw=Math.pow(10, Math.floor(Math.log10(raw||1))); const s=raw/pw; let b=1; if(s>5) b=10; else if(s>2) b=5; else if(s>1) b=2; return b*pw; }
+
+function drawPhaseAxes(maxI, maxE){
+  const r=pRect(), w=phaseCanvas.width, h=phaseCanvas.height;
+  pctx.clearRect(0,0,w,h);
+  pctx.font='11px Arial'; pctx.fillStyle='#444'; pctx.textBaseline='middle';
+  // grid
+  const yMax=maxI*1.05 || 1, yStep=niceStep2(yMax);
+  for(let v=0; v<=yMax+1e-12; v+=yStep){
+    const y=mapPhaseY(v, yMax);
+    pctx.strokeStyle='rgba(0,0,0,0.06)'; pctx.beginPath(); pctx.moveTo(r.left, y); pctx.lineTo(w-r.right, y); pctx.stroke();
+  }
+  const xMax=maxE*1.10 || 1, xStep=niceStep2(xMax);
+  for(let v=0; v<=xMax+1e-12; v+=xStep){
+    const x=mapPhaseX(v, xMax);
+    pctx.strokeStyle='rgba(0,0,0,0.08)'; pctx.beginPath(); pctx.moveTo(x, r.top); pctx.lineTo(x, h-r.bottom); pctx.stroke();
+  }
+  // axes box
+  pctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); pctx.lineWidth=1;
+  pctx.beginPath();
+  pctx.moveTo(r.left, r.top); pctx.lineTo(r.left, h-r.bottom);
+  pctx.moveTo(w-r.right, r.top); pctx.lineTo(w-r.right, h-r.bottom);
+  pctx.moveTo(r.left, h-r.bottom); pctx.lineTo(w-r.right, h-r.bottom);
+  pctx.stroke();
+  // ticks
+  pctx.textAlign='right';
+  for(let v=0; v<=yMax+1e-12; v+=yStep){
+    const y=mapPhaseY(v, yMax);
+    pctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); pctx.beginPath(); pctx.moveTo(r.left-4, y); pctx.lineTo(r.left, y); pctx.stroke();
+    pctx.fillText(v.toPrecision(2), r.left-6, y);
+  }
+  pctx.textAlign='center'; pctx.textBaseline='top';
+  for(let v=0; v<=xMax+1e-12; v+=xStep){
+    const x=mapPhaseX(v, xMax);
+    pctx.strokeStyle=getComputedStyle(document.documentElement).getPropertyValue('--axes'); pctx.beginPath(); pctx.moveTo(x, h-r.bottom); pctx.lineTo(x, h-r.bottom+4); pctx.stroke();
+    pctx.fillText(v.toPrecision(2), x, h-r.bottom+6);
+  }
+  // labels
+  pctx.fillStyle='#333'; pctx.textAlign='left'; pctx.fillText('dE/dt (интенсивность)', r.left, r.top-2);
+  pctx.textAlign='right'; pctx.fillText('E (интегральная энергия)', w-r.right, r.top-2);
+}
+
+function drawPhase(){
+  const n = Math.min(sampleTimes.length, integralValues.length, derivedIntensity.length);
+  if(n<2){ drawPhaseAxes(1,1); return; }
+  const scale = computeDerivedScale_Asymptote();
+  const maxI = Math.max(...derivedIntensity.map(v=>v*scale), 1e-12);
+  const maxE = Math.max(...integralValues, 1e-12);
+  drawPhaseAxes(maxI, maxE);
+
+  const r=pRect();
+  const xMax=maxE*1.10, yMax=maxI*1.05;
+  const wPlot = phaseCanvas.width - r.left - r.right;
+  const step = Math.max(1, Math.ceil(n / wPlot));
+  pctx.beginPath();
+  for(let i=0;i<n;i+=step){
+    const E = integralValues[i];
+    const I = derivedIntensity[i]*scale;
+    const x = mapPhaseX(E, xMax);
+    const y = mapPhaseY(I, yMax);
+    if(i===0) pctx.moveTo(x,y); else pctx.lineTo(x,y);
+  }
+  const orange = getComputedStyle(document.documentElement).getPropertyValue('--orange').trim();
+  pctx.strokeStyle = orange; pctx.lineWidth = 2;
+  pctx.stroke();
+}
+
+let lastPhaseDraw=0;
+function drawPhaseThrottled(){ const now=performance.now(); if(now-lastPhaseDraw<80) return; lastPhaseDraw=now; drawPhase(); }
+
 function drawSeriesByTime(times, vals, color, lw, yMax){
   const r=plotRect(); const wPlot=canvas.width - r.left - r.right; const n=times.length; if(n<2) return;
   const tMax = times[n-1];
@@ -398,7 +478,7 @@ function detectSignalStart(intensity, currentTime){
 }
 
 let lastDraw = 0;
-function drawGraphThrottled(){ const now=performance.now(); if(now-lastDraw<80) return; lastDraw=now; drawGraph(); }
+function drawGraphThrottled(){ const now=performance.now(); if(now-lastDraw<80) return; lastDraw=now; drawGraph(); drawPhase(); drawPhaseThrottled(); }
 
 function tick(){
   if(!recording) return;
