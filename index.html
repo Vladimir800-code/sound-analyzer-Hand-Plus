@@ -106,6 +106,12 @@
 </div>
 
 <script>
+
+// === Unit scaling: W -> mW (display only) ===
+const UNIT_SCALE = 1000; // 1 W = 1000 mW
+function I_to_mW(v){ return v*UNIT_SCALE; }
+function E_to_mW_s(v){ return v*UNIT_SCALE; }
+
 function safeGet(k, def){ try{ const v=localStorage.getItem(k); return v===null?def:v; }catch(e){ return def; } }
 function safeSet(k, v){ try{ localStorage.setItem(k, v); }catch(e){} }
 function loadNum(k,d){ const s=safeGet(k,null); const v=Number(s); return Number.isFinite(v)?v:d; }
@@ -261,8 +267,8 @@ function drawAxes(maxI, maxE){
     ctx.beginPath(); ctx.moveTo(x, h-r.bottom); ctx.lineTo(x, h-r.bottom+4); ctx.stroke();
     ctx.fillText(t.toFixed(2)+' s', x, h-r.bottom+6);
   }
-  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--orange'); ctx.textAlign='left'; ctx.fillText('Интенсивность (дифф.)', r.left, r.top-2);
-  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--green'); ctx.textAlign='right'; ctx.fillText('Интегральная энергия', w-r.right, r.top-2);
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--orange'); ctx.textAlign='left'; ctx.fillText('Интенсивность (дифф., мВт/м²)', r.left, r.top-2);
+  ctx.fillStyle=getComputedStyle(document.documentElement).getPropertyValue('--green'); ctx.textAlign='right'; ctx.fillText('Интегральная энергия (мВт·с/м²)', w-r.right, r.top-2);
 }
 
 
@@ -312,16 +318,16 @@ function drawPhaseAxes(maxI, maxE){
     pctx.fillText(v.toPrecision(2), x, h-r.bottom+6);
   }
   // labels
-  pctx.fillStyle='#333'; pctx.textAlign='left'; pctx.fillText('dE/dt (интенсивность)', r.left, r.top-2);
-  pctx.textAlign='right'; pctx.fillText('E (интегральная энергия)', w-r.right, r.top-2);
+  pctx.fillStyle='#333'; pctx.textAlign='left'; pctx.fillText('dE/dt (интенсивность, мВт/м²)', r.left, r.top-2);
+  pctx.textAlign='right'; pctx.fillText('E (интегральная энергия, мВт·с/м²)', w-r.right, r.top-2);
 }
 
 function drawPhase(){
   const n = Math.min(sampleTimes.length, integralValues.length, derivedIntensity.length);
   if(n<2){ drawPhaseAxes(1,1); return; }
   const scale = computeDerivedScale_Asymptote();
-  const maxI = Math.max(...derivedIntensity.map(v=>v*scale), 1e-12);
-  const maxE = Math.max(...integralValues, 1e-12);
+  const maxI = Math.max(...derivedIntensity.map(v=>I_to_mW(v*scale)), 1e-12);
+  const maxE = Math.max(...integralValues.map(E_to_mW_s), 1e-12);
   drawPhaseAxes(maxI, maxE);
 
   const r=pRect();
@@ -330,8 +336,8 @@ function drawPhase(){
   const step = Math.max(1, Math.ceil(n / wPlot));
   pctx.beginPath();
   for(let i=0;i<n;i+=step){
-    const E = integralValues[i];
-    const I = derivedIntensity[i]*scale;
+    const E = E_to_mW_s(integralValues[i]);
+    const I = I_to_mW(derivedIntensity[i]*scale);
     const x = mapPhaseX(E, xMax);
     const y = mapPhaseY(I, yMax);
     if(i===0) pctx.moveTo(x,y); else pctx.lineTo(x,y);
@@ -360,6 +366,7 @@ function drawSeriesByTime(times, vals, color, lw, yMax){
 
 /* === KPIs (AFEV1, AFVC, AFEF25–75, PEAF) — added, no other logic touched === */
 function fmtVal(x){ if(!isFinite(x)) return '—'; const a=Math.abs(x); if(a===0) return '0.00000'; return (a>=1e-4 && a<1e3) ? x.toFixed(5) : x.toExponential(2); }
+function fmtKPI(x){ if(!isFinite(x)) return '—'; const a=Math.abs(x); if(a===0) return '0.000'; return (a>=1e-4 && a<1e3) ? x.toFixed(3) : x.toExponential(2); }
 function timeAtEnergy(target){
   const xs=sampleTimes, ys=integralValues, n=xs.length;
   if(n<2) return xs.length?xs[0]:0;
@@ -395,31 +402,31 @@ function updateKPIs(){
     const t=sampleTimes[i]; if(t<s || t>e) continue;
     const v=(derivedIntensity[i]||0)*scale; if(v>peak) peak=v;
   }
-  el1.textContent = fmtVal(AFEV1);
-  el2.textContent = fmtVal(total);
-  el3.textContent = isFinite(AFEF2575)? fmtVal(AFEF2575) : '—';
-  el4.textContent = fmtVal(peak);
+  el1.textContent = fmtKPI(E_to_mW_s(AFEV1));
+  el2.textContent = fmtKPI(E_to_mW_s(total));
+  el3.textContent = isFinite(AFEF2575)? fmtKPI(I_to_mW(AFEF2575)) : '—';
+  el4.textContent = fmtKPI(I_to_mW(peak));
 }
 /* === End KPI block === */
 
 function drawGraph(){
 
   const scale = computeDerivedScale_Asymptote();
-  const maxRaw = Math.max(...rawIntensity,1e-12);
-  const maxDer = Math.max(...derivedIntensity.map(v=>v*scale),1e-12);
+  const maxRaw = Math.max(...rawIntensity.map(I_to_mW),1e-12);
+  const maxDer = Math.max(...derivedIntensity.map(v=>I_to_mW(v*scale)),1e-12);
   const maxI = Math.max(maxRaw, maxDer);
-  const maxE = Math.max(...integralValues,1e-12);
+  const maxE = Math.max(...integralValues.map(E_to_mW_s),1e-12);
   drawAxes(maxI, maxE);
   const style = getComputedStyle(document.documentElement);
   const blue=style.getPropertyValue('--blue').trim();
   const orange=style.getPropertyValue('--orange').trim();
   const green=style.getPropertyValue('--green').trim();
   if(document.getElementById('chkRaw').checked)
-    drawSeriesByTime(sampleTimes, rawIntensity, blue, 1.5, maxI*1.05);
+    drawSeriesByTime(sampleTimes, rawIntensity.map(I_to_mW), blue, 1.5, maxI*1.05);
   if(document.getElementById('chkDerived').checked)
-    drawSeriesByTime(sampleTimes, derivedIntensity.map(v=>v*scale), orange, 2.0, maxI*1.05);
+    drawSeriesByTime(sampleTimes, derivedIntensity.map(v=>I_to_mW(v*scale)), orange, 2.0, maxI*1.05);
   if(document.getElementById('chkIntegral').checked)
-    drawSeriesByTime(sampleTimes, integralValues, green, 2.0, maxE*1.1);
+    drawSeriesByTime(sampleTimes, integralValues.map(E_to_mW_s), green, 2.0, maxE*1.1);
 }
 
 function trapezoidIntegral(times, values, tStart, tEnd){
